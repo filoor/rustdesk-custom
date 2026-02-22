@@ -1,0 +1,490 @@
+name: DD Remote - Custom RustDesk Android APK
+
+# Handmatig starten via GitHub Actions tabblad → Run workflow
+on:
+  workflow_dispatch:
+    inputs:
+      server:
+        description: 'RustDesk server hostname'
+        required: true
+        default: 'rust.datadynamicsit.nl'
+      server_key:
+        description: 'Server publieke sleutel (ed25519)'
+        required: true
+        default: 'i1XvLUeHr97ZPNqGbYI7cPXcIAZTyPGDeocTR2mSlP0='
+      password:
+        description: 'Standaard permanent wachtwoord'
+        required: true
+        default: 'Tarik123'
+      app_name:
+        description: 'App naam (zoals getoond op apparaat)'
+        required: true
+        default: 'DD Remote'
+
+env:
+  RENDEZVOUS_SERVER: ${{ github.event.inputs.server }}
+  FLUTTER_VERSION: '3.24.5'
+  FLUTTER_RUST_BRIDGE_VERSION: '1.80.1'
+  CARGO_EXPAND_VERSION: '1.0.95'
+  RUST_VERSION: '1.75'
+  CARGO_NDK_VERSION: '3.1.2'
+  NDK_VERSION: 'r27c'
+  VCPKG_COMMIT_ID: '120deac3062162151622ca4860575a33844ba10b'
+  VCPKG_BINARY_SOURCES: 'clear;x-gha,readwrite'
+
+jobs:
+  generate-bridge:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout broncode
+        uses: actions/checkout@v4
+        with:
+          ref: '1.4.5'
+          submodules: recursive
+
+      - name: Systeem dependencies installeren
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            clang cmake curl gcc git g++ \
+            libclang-dev libgtk-3-dev llvm-dev \
+            nasm ninja-build pkg-config wget
+
+      - name: Rust instellen
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt
+
+      - name: Flutter instellen (voor bridge)
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.3'
+          channel: stable
+          cache: true
+
+      - name: Flutter rust bridge genereren
+        run: |
+          cargo install cargo-expand --version ${{ env.CARGO_EXPAND_VERSION }} --locked
+          cargo install flutter_rust_bridge_codegen --version ${{ env.FLUTTER_RUST_BRIDGE_VERSION }} --features "uuid" --locked
+          pushd flutter && sed -i -e 's/extended_text: 14.0.0/extended_text: 13.0.0/g' pubspec.yaml && flutter pub get && popd
+          ~/.cargo/bin/flutter_rust_bridge_codegen \
+            --rust-input ./src/flutter_ffi.rs \
+            --dart-output ./flutter/lib/generated_bridge.dart \
+            --c-output ./flutter/macos/Runner/bridge_generated.h
+
+      - name: Bridge bestanden uploaden
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-artifact
+          path: |
+            ./src/bridge_generated.rs
+            ./src/bridge_generated.io.rs
+            ./flutter/lib/generated_bridge.dart
+            ./flutter/lib/generated_bridge.freezed.dart
+            ./flutter/macos/Runner/bridge_generated.h
+
+  build-android:
+    needs: [generate-bridge]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - { arch: aarch64, target: aarch64-linux-android, android_target: arm64-v8a, platform: android-arm64 }
+          - { arch: armv7, target: armv7-linux-androideabi, android_target: armeabi-v7a, platform: android-arm }
+
+    steps:
+      - name: Schijfruimte vrijmaken
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+
+      - name: GitHub Actions cache instellen
+        uses: actions/github-script@v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Systeem dependencies installeren
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            clang cmake curl gcc-multilib git g++ g++-multilib \
+            libayatana-appindicator3-dev libasound2-dev libc6-dev \
+            libclang-dev libunwind-dev libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev libgtk-3-dev \
+            libpam0g-dev libpulse-dev libva-dev \
+            libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxdo-dev libxfixes-dev llvm-dev nasm ninja-build \
+            openjdk-17-jdk-headless pkg-config tree wget
+
+      - name: Checkout broncode
+        uses: actions/checkout@v4
+        with:
+          ref: '1.4.5'
+          submodules: recursive
+
+      - name: Patch standaard server in config.rs
+        run: |
+          SERVER="${{ github.event.inputs.server }}"
+          echo "Server instellen op: $SERVER"
+          sed -i "s|rs-ny\.rustdesk\.com|$SERVER|g" libs/hbb_common/src/config.rs
+          sed -i "s|rs-sg\.rustdesk\.com|$SERVER|g" libs/hbb_common/src/config.rs
+          sed -i "s|rs-cn\.rustdesk\.com|$SERVER|g" libs/hbb_common/src/config.rs
+          echo "=== Serverreferenties na patch ==="
+          grep -n "rustdesk\.com\|$SERVER" libs/hbb_common/src/config.rs || echo "Geen standaard servers meer gevonden."
+
+      - name: DD Remote custom instellingen patchen
+        run: |
+          APP_NAME="${{ github.event.inputs.app_name }}"
+          SERVER="${{ github.event.inputs.server }}"
+          SERVER_KEY="${{ github.event.inputs.server_key }}"
+          PASSWORD="${{ github.event.inputs.password }}"
+
+          echo "=== App naam: $APP_NAME ==="
+          echo "=== Server: $SERVER ==="
+          echo "=== Wachtwoord: ingesteld ==="
+
+          # 1. App naam wijzigen in Android resources
+          sed -i "s|<string name=\"app_name\">RustDesk</string>|<string name=\"app_name\">$APP_NAME</string>|g" \
+            flutter/android/app/src/main/res/values/strings.xml
+          sed -i "s|android:label=\"RustDesk\"|android:label=\"$APP_NAME\"|g" \
+            flutter/android/app/src/main/AndroidManifest.xml
+          sed -i "s|android:label=\"RustDesk Input\"|android:label=\"$APP_NAME Input\"|g" \
+            flutter/android/app/src/main/AndroidManifest.xml
+
+          echo "=== strings.xml na patch ==="
+          cat flutter/android/app/src/main/res/values/strings.xml
+
+          # 2. Patch load_custom_client() in src/common.rs om onze instellingen te hardcoden
+          python3 << PYEOF
+          import sys
+
+          app_name = "$APP_NAME"
+          server = "$SERVER"
+          server_key = "$SERVER_KEY"
+          password = "$PASSWORD"
+
+          with open('src/common.rs', 'r') as f:
+              content = f.read()
+
+          # Nieuwe load_custom_client() functie met hardcoded instellingen
+          new_function = f'''pub fn load_custom_client() {{
+              // DD Remote - Hardcoded custom instellingen
+              *config::APP_NAME.write().unwrap() = "{app_name}".to_owned();
+
+              // Standaard server instellingen
+              let defaults: Vec<(&str, &str)> = vec![
+                  ("custom-rendezvous-server", "{server}"),
+                  ("key", "{server_key}"),
+                  ("verification-method", "use-permanent-password"),
+                  ("access-mode", "full"),
+                  ("enable-lan-discovery", "Y"),
+                  ("direct-server", "Y"),
+                  ("enable-audio", "N"),
+                  ("enable-clipboard", "Y"),
+                  ("av1-test", "Y"),
+                  ("allow-remote-config-modification", "Y"),
+                  ("allow-insecure-tls-fallback", "Y"),
+              ];
+              for (k, v) in &defaults {{
+                  config::DEFAULT_SETTINGS.write().unwrap().insert(k.to_string(), v.to_string());
+              }}
+
+              // Standaard permanent wachtwoord (gebruiker kan dit later wijzigen)
+              config::HARD_SETTINGS.write().unwrap().insert("password".to_string(), "{password}".to_string());
+          }}'''
+
+          # Zoek de functie en vervang met brace counting
+          marker = "pub fn load_custom_client() {"
+          start = content.find(marker)
+          if start == -1:
+              print("FOUT: load_custom_client() niet gevonden in src/common.rs!")
+              sys.exit(1)
+
+          # Tel braces om het einde van de functie te vinden
+          brace_count = 0
+          end = start
+          found_first_brace = False
+          for i in range(start, len(content)):
+              if content[i] == '{':
+                  brace_count += 1
+                  found_first_brace = True
+              elif content[i] == '}':
+                  brace_count -= 1
+                  if found_first_brace and brace_count == 0:
+                      end = i + 1
+                      break
+
+          content = content[:start] + new_function + content[end:]
+
+          with open('src/common.rs', 'w') as f:
+              f.write(content)
+
+          print(f"OK: load_custom_client() gepatcht met {app_name} instellingen")
+          PYEOF
+
+          echo "=== Verificatie load_custom_client patch ==="
+          grep -A 5 "pub fn load_custom_client" src/common.rs
+
+      - name: Patch InputService voor Android TV (shell touch fallback)
+        run: |
+          INPUT_FILE="flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt"
+          python3 << 'PYEOF'
+          import sys
+
+          filepath = "flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt"
+          with open(filepath, 'r') as f:
+              content = f.read()
+
+          # 1. Add import for PackageManager
+          content = content.replace(
+              "import kotlin.math.max",
+              "import kotlin.math.max\nimport android.content.pm.PackageManager"
+          )
+
+          # 2. Add hasTouchScreen property and shellInput helper after the class opening
+          shell_helpers = '''
+    // DD Remote: shell fallback voor Android TV zonder touchscreen
+    private val hasTouchScreen: Boolean by lazy {
+        packageManager.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN)
+    }
+
+    private var gestureStartX = 0
+    private var gestureStartY = 0
+
+    private fun shellInput(vararg args: String) {
+        try {
+            val cmd = arrayOf("su", "0", "input") + args
+            Runtime.getRuntime().exec(cmd)
+        } catch (e: Exception) {
+            Log.e(logTag, "shellInput error: $e")
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.N)
+    private fun onMouseInputShell(mask: Int, x: Int, y: Int) {
+        val sx = (max(0, x) * SCREEN_INFO.scale)
+        val sy = (max(0, y) * SCREEN_INFO.scale)
+
+        when {
+            mask == 0 || mask == LEFT_MOVE -> {
+                mouseX = sx
+                mouseY = sy
+            }
+            mask == LEFT_DOWN -> {
+                leftIsDown = true
+                mouseX = sx
+                mouseY = sy
+                gestureStartX = sx
+                gestureStartY = sy
+                lastTouchGestureStartTime = System.currentTimeMillis()
+            }
+            mask == LEFT_UP -> {
+                if (leftIsDown) {
+                    leftIsDown = false
+                    val duration = System.currentTimeMillis() - lastTouchGestureStartTime
+                    if (abs(gestureStartX - mouseX) + abs(gestureStartY - mouseY) < 10) {
+                        shellInput("tap", mouseX.toString(), mouseY.toString())
+                    } else {
+                        shellInput("swipe", gestureStartX.toString(), gestureStartY.toString(),
+                            mouseX.toString(), mouseY.toString(), max(1L, duration).toString())
+                    }
+                }
+            }
+            mask == RIGHT_UP -> {
+                shellInput("swipe", mouseX.toString(), mouseY.toString(),
+                    mouseX.toString(), mouseY.toString(), longPressDuration.toString())
+            }
+            mask == BACK_UP -> {
+                performGlobalAction(GLOBAL_ACTION_BACK)
+            }
+            mask == WHEEL_BUTTON_DOWN -> {
+                timer.purge()
+                recentActionTask = object : TimerTask() {
+                    override fun run() {
+                        performGlobalAction(GLOBAL_ACTION_RECENTS)
+                        recentActionTask = null
+                    }
+                }
+                timer.schedule(recentActionTask, LONG_TAP_DELAY)
+            }
+            mask == WHEEL_BUTTON_UP -> {
+                if (recentActionTask != null) {
+                    recentActionTask!!.cancel()
+                    performGlobalAction(GLOBAL_ACTION_HOME)
+                }
+            }
+            mask == WHEEL_DOWN -> {
+                if (mouseY >= WHEEL_STEP) {
+                    shellInput("swipe", mouseX.toString(), mouseY.toString(),
+                        mouseX.toString(), (mouseY - WHEEL_STEP).toString(), WHEEL_DURATION.toString())
+                }
+            }
+            mask == WHEEL_UP -> {
+                shellInput("swipe", mouseX.toString(), mouseY.toString(),
+                    mouseX.toString(), (mouseY + WHEEL_STEP).toString(), WHEEL_DURATION.toString())
+            }
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.N)
+    private fun onTouchInputShell(mask: Int, _x: Int, _y: Int) {
+        val sx = (max(0, _x) * SCREEN_INFO.scale)
+        val sy = (max(0, _y) * SCREEN_INFO.scale)
+        when (mask) {
+            TOUCH_PAN_START -> {
+                gestureStartX = sx
+                gestureStartY = sy
+                mouseX = sx
+                mouseY = sy
+                lastTouchGestureStartTime = System.currentTimeMillis()
+            }
+            TOUCH_PAN_UPDATE -> {
+                mouseX = max(0, mouseX - _x * SCREEN_INFO.scale)
+                mouseY = max(0, mouseY - _y * SCREEN_INFO.scale)
+            }
+            TOUCH_PAN_END -> {
+                val duration = System.currentTimeMillis() - lastTouchGestureStartTime
+                shellInput("swipe", gestureStartX.toString(), gestureStartY.toString(),
+                    mouseX.toString(), mouseY.toString(), max(1L, duration).toString())
+                mouseX = sx
+                mouseY = sy
+            }
+        }
+    }
+'''
+
+          # Insert after "private val logTag = "input service""
+          content = content.replace(
+              'private val logTag = "input service"',
+              'private val logTag = "input service"' + shell_helpers
+          )
+
+          # 3. Add hasTouchScreen check at start of onMouseInput
+          content = content.replace(
+              'fun onMouseInput(mask: Int, _x: Int, _y: Int) {\n        val x = max(0, _x)\n        val y = max(0, _y)',
+              'fun onMouseInput(mask: Int, _x: Int, _y: Int) {\n        if (!hasTouchScreen) {\n            onMouseInputShell(mask, _x, _y)\n            return\n        }\n        val x = max(0, _x)\n        val y = max(0, _y)'
+          )
+
+          # 4. Add hasTouchScreen check at start of onTouchInput
+          content = content.replace(
+              'fun onTouchInput(mask: Int, _x: Int, _y: Int) {\n        when (mask) {',
+              'fun onTouchInput(mask: Int, _x: Int, _y: Int) {\n        if (!hasTouchScreen) {\n            onTouchInputShell(mask, _x, _y)\n            return\n        }\n        when (mask) {'
+          )
+
+          with open(filepath, 'w') as f:
+              f.write(content)
+
+          print("OK: InputService.kt gepatcht met shell touch fallback voor Android TV")
+          PYEOF
+
+          echo "=== Verificatie InputService patch ==="
+          grep -n "hasTouchScreen\|shellInput\|onMouseInputShell" "$INPUT_FILE" | head -10
+
+      - name: Flutter instellen
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+
+      - name: Flutter patchen
+        run: |
+          cd $(dirname $(dirname $(which flutter)))
+          [[ "3.24.5" == ${{ env.FLUTTER_VERSION }} ]] && git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
+
+      - name: Android NDK instellen
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: true
+
+      - name: vcpkg instellen
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: /opt/artifacts/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: vcpkg dependencies installeren
+        run: |
+          if ! ./flutter/build_android_deps.sh "${{ matrix.job.android_target }}"; then
+            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+              echo "$_1:"; echo "======"; cat "$_1"; echo "======"; echo ""
+            done
+            exit 1
+          fi
+        shell: bash
+
+      - name: Bridge bestanden herstellen
+        uses: actions/download-artifact@v4
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: Rust instellen
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt
+
+      - name: Rust library bouwen
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          rustup target add ${{ matrix.job.target }}
+          cargo install cargo-ndk --version ${{ env.CARGO_NDK_VERSION }} --locked
+          case ${{ matrix.job.target }} in
+            aarch64-linux-android)
+              ./flutter/ndk_arm64.sh
+              mkdir -p ./flutter/android/app/src/main/jniLibs/arm64-v8a
+              cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so
+            ;;
+            armv7-linux-androideabi)
+              ./flutter/ndk_arm.sh
+              mkdir -p ./flutter/android/app/src/main/jniLibs/armeabi-v7a
+              cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/armeabi-v7a/librustdesk.so
+            ;;
+          esac
+
+      - name: APK bouwen met Flutter
+        env:
+          JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          export PATH=/usr/lib/jvm/java-17-openjdk-amd64/bin:$PATH
+          # Gradle geheugen verhogen
+          sed -i "s/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx2g/g" ./flutter/android/gradle.properties
+          # Debug signing gebruiken (geen keystore nodig)
+          sed -i "s/signingConfigs.release/signingConfigs.debug/g" ./flutter/android/app/build.gradle
+          # libc++_shared.so kopiëren
+          case ${{ matrix.job.target }} in
+            aarch64-linux-android)
+              cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so ./flutter/android/app/src/main/jniLibs/arm64-v8a/
+              cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so
+            ;;
+            armv7-linux-androideabi)
+              cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/arm-linux-androideabi/libc++_shared.so ./flutter/android/app/src/main/jniLibs/armeabi-v7a/
+              cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/armeabi-v7a/librustdesk.so
+            ;;
+          esac
+          pushd flutter
+          flutter build apk --release --target-platform ${{ matrix.job.platform }} --split-per-abi
+          popd
+
+      - name: APK uploaden als artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ddremote-${{ matrix.job.arch }}-${{ github.event.inputs.server }}
+          path: flutter/build/app/outputs/flutter-apk/*.apk
+          retention-days: 30
