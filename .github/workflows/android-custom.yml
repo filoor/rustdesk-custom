@@ -237,158 +237,53 @@ jobs:
 
       - name: Patch InputService voor Android TV (shell touch fallback)
         run: |
-          INPUT_FILE="flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt"
-          python3 << 'PYEOF'
-          import sys
-
+          cat > /tmp/patch_input.py << 'PATCHSCRIPT'
+          import sys, textwrap
           filepath = "flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt"
           with open(filepath, 'r') as f:
               content = f.read()
-
-          # 1. Add import for PackageManager
-          content = content.replace(
-              "import kotlin.math.max",
-              "import kotlin.math.max\nimport android.content.pm.PackageManager"
-          )
-
-          # 2. Add hasTouchScreen property and shellInput helper after the class opening
-          shell_helpers = '''
-    // DD Remote: shell fallback voor Android TV zonder touchscreen
-    private val hasTouchScreen: Boolean by lazy {
-        packageManager.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN)
-    }
-
-    private var gestureStartX = 0
-    private var gestureStartY = 0
-
-    private fun shellInput(vararg args: String) {
-        try {
-            val cmd = arrayOf("su", "0", "input") + args
-            Runtime.getRuntime().exec(cmd)
-        } catch (e: Exception) {
-            Log.e(logTag, "shellInput error: $e")
-        }
-    }
-
-    @RequiresApi(Build.VERSION_CODES.N)
-    private fun onMouseInputShell(mask: Int, x: Int, y: Int) {
-        val sx = (max(0, x) * SCREEN_INFO.scale)
-        val sy = (max(0, y) * SCREEN_INFO.scale)
-
-        when {
-            mask == 0 || mask == LEFT_MOVE -> {
-                mouseX = sx
-                mouseY = sy
-            }
-            mask == LEFT_DOWN -> {
-                leftIsDown = true
-                mouseX = sx
-                mouseY = sy
-                gestureStartX = sx
-                gestureStartY = sy
-                lastTouchGestureStartTime = System.currentTimeMillis()
-            }
-            mask == LEFT_UP -> {
-                if (leftIsDown) {
-                    leftIsDown = false
-                    val duration = System.currentTimeMillis() - lastTouchGestureStartTime
-                    if (abs(gestureStartX - mouseX) + abs(gestureStartY - mouseY) < 10) {
-                        shellInput("tap", mouseX.toString(), mouseY.toString())
-                    } else {
-                        shellInput("swipe", gestureStartX.toString(), gestureStartY.toString(),
-                            mouseX.toString(), mouseY.toString(), max(1L, duration).toString())
-                    }
-                }
-            }
-            mask == RIGHT_UP -> {
-                shellInput("swipe", mouseX.toString(), mouseY.toString(),
-                    mouseX.toString(), mouseY.toString(), longPressDuration.toString())
-            }
-            mask == BACK_UP -> {
-                performGlobalAction(GLOBAL_ACTION_BACK)
-            }
-            mask == WHEEL_BUTTON_DOWN -> {
-                timer.purge()
-                recentActionTask = object : TimerTask() {
-                    override fun run() {
-                        performGlobalAction(GLOBAL_ACTION_RECENTS)
-                        recentActionTask = null
-                    }
-                }
-                timer.schedule(recentActionTask, LONG_TAP_DELAY)
-            }
-            mask == WHEEL_BUTTON_UP -> {
-                if (recentActionTask != null) {
-                    recentActionTask!!.cancel()
-                    performGlobalAction(GLOBAL_ACTION_HOME)
-                }
-            }
-            mask == WHEEL_DOWN -> {
-                if (mouseY >= WHEEL_STEP) {
-                    shellInput("swipe", mouseX.toString(), mouseY.toString(),
-                        mouseX.toString(), (mouseY - WHEEL_STEP).toString(), WHEEL_DURATION.toString())
-                }
-            }
-            mask == WHEEL_UP -> {
-                shellInput("swipe", mouseX.toString(), mouseY.toString(),
-                    mouseX.toString(), (mouseY + WHEEL_STEP).toString(), WHEEL_DURATION.toString())
-            }
-        }
-    }
-
-    @RequiresApi(Build.VERSION_CODES.N)
-    private fun onTouchInputShell(mask: Int, _x: Int, _y: Int) {
-        val sx = (max(0, _x) * SCREEN_INFO.scale)
-        val sy = (max(0, _y) * SCREEN_INFO.scale)
-        when (mask) {
-            TOUCH_PAN_START -> {
-                gestureStartX = sx
-                gestureStartY = sy
-                mouseX = sx
-                mouseY = sy
-                lastTouchGestureStartTime = System.currentTimeMillis()
-            }
-            TOUCH_PAN_UPDATE -> {
-                mouseX = max(0, mouseX - _x * SCREEN_INFO.scale)
-                mouseY = max(0, mouseY - _y * SCREEN_INFO.scale)
-            }
-            TOUCH_PAN_END -> {
-                val duration = System.currentTimeMillis() - lastTouchGestureStartTime
-                shellInput("swipe", gestureStartX.toString(), gestureStartY.toString(),
-                    mouseX.toString(), mouseY.toString(), max(1L, duration).toString())
-                mouseX = sx
-                mouseY = sy
-            }
-        }
-    }
-'''
-
-          # Insert after "private val logTag = "input service""
-          content = content.replace(
-              'private val logTag = "input service"',
-              'private val logTag = "input service"' + shell_helpers
-          )
-
-          # 3. Add hasTouchScreen check at start of onMouseInput
-          content = content.replace(
-              'fun onMouseInput(mask: Int, _x: Int, _y: Int) {\n        val x = max(0, _x)\n        val y = max(0, _y)',
-              'fun onMouseInput(mask: Int, _x: Int, _y: Int) {\n        if (!hasTouchScreen) {\n            onMouseInputShell(mask, _x, _y)\n            return\n        }\n        val x = max(0, _x)\n        val y = max(0, _y)'
-          )
-
-          # 4. Add hasTouchScreen check at start of onTouchInput
-          content = content.replace(
-              'fun onTouchInput(mask: Int, _x: Int, _y: Int) {\n        when (mask) {',
-              'fun onTouchInput(mask: Int, _x: Int, _y: Int) {\n        if (!hasTouchScreen) {\n            onTouchInputShell(mask, _x, _y)\n            return\n        }\n        when (mask) {'
-          )
-
+          content = content.replace("import kotlin.math.max", "import kotlin.math.max\nimport android.content.pm.PackageManager")
+          helpers = textwrap.dedent("""\n
+              // DD Remote: shell fallback voor Android TV zonder touchscreen
+              private val hasTouchScreen: Boolean by lazy { packageManager.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN) }
+              private var gestureStartX = 0
+              private var gestureStartY = 0
+              private fun shellInput(vararg args: String) { try { Runtime.getRuntime().exec(arrayOf("su", "0", "input") + args) } catch (e: Exception) { Log.e(logTag, "shellInput error: $$e") } }
+              @RequiresApi(Build.VERSION_CODES.N)
+              private fun onMouseInputShell(mask: Int, x: Int, y: Int) {
+                  val sx = (max(0, x) * SCREEN_INFO.scale); val sy = (max(0, y) * SCREEN_INFO.scale)
+                  when {
+                      mask == 0 || mask == LEFT_MOVE -> { mouseX = sx; mouseY = sy }
+                      mask == LEFT_DOWN -> { leftIsDown = true; mouseX = sx; mouseY = sy; gestureStartX = sx; gestureStartY = sy; lastTouchGestureStartTime = System.currentTimeMillis() }
+                      mask == LEFT_UP -> { if (leftIsDown) { leftIsDown = false; val d = System.currentTimeMillis() - lastTouchGestureStartTime; if (abs(gestureStartX - mouseX) + abs(gestureStartY - mouseY) < 10) { shellInput("tap", mouseX.toString(), mouseY.toString()) } else { shellInput("swipe", gestureStartX.toString(), gestureStartY.toString(), mouseX.toString(), mouseY.toString(), max(1L, d).toString()) } } }
+                      mask == RIGHT_UP -> { shellInput("swipe", mouseX.toString(), mouseY.toString(), mouseX.toString(), mouseY.toString(), longPressDuration.toString()) }
+                      mask == BACK_UP -> { performGlobalAction(GLOBAL_ACTION_BACK) }
+                      mask == WHEEL_BUTTON_DOWN -> { timer.purge(); recentActionTask = object : TimerTask() { override fun run() { performGlobalAction(GLOBAL_ACTION_RECENTS); recentActionTask = null } }; timer.schedule(recentActionTask, LONG_TAP_DELAY) }
+                      mask == WHEEL_BUTTON_UP -> { if (recentActionTask != null) { recentActionTask!!.cancel(); performGlobalAction(GLOBAL_ACTION_HOME) } }
+                      mask == WHEEL_DOWN -> { if (mouseY >= WHEEL_STEP) { shellInput("swipe", mouseX.toString(), mouseY.toString(), mouseX.toString(), (mouseY - WHEEL_STEP).toString(), WHEEL_DURATION.toString()) } }
+                      mask == WHEEL_UP -> { shellInput("swipe", mouseX.toString(), mouseY.toString(), mouseX.toString(), (mouseY + WHEEL_STEP).toString(), WHEEL_DURATION.toString()) }
+                  }
+              }
+              @RequiresApi(Build.VERSION_CODES.N)
+              private fun onTouchInputShell(mask: Int, _x: Int, _y: Int) {
+                  val sx = (max(0, _x) * SCREEN_INFO.scale); val sy = (max(0, _y) * SCREEN_INFO.scale)
+                  when (mask) {
+                      TOUCH_PAN_START -> { gestureStartX = sx; gestureStartY = sy; mouseX = sx; mouseY = sy; lastTouchGestureStartTime = System.currentTimeMillis() }
+                      TOUCH_PAN_UPDATE -> { mouseX = max(0, mouseX - _x * SCREEN_INFO.scale); mouseY = max(0, mouseY - _y * SCREEN_INFO.scale) }
+                      TOUCH_PAN_END -> { val d = System.currentTimeMillis() - lastTouchGestureStartTime; shellInput("swipe", gestureStartX.toString(), gestureStartY.toString(), mouseX.toString(), mouseY.toString(), max(1L, d).toString()); mouseX = sx; mouseY = sy }
+                  }
+              }
+          """)
+          content = content.replace('private val logTag = "input service"', 'private val logTag = "input service"' + helpers)
+          content = content.replace('fun onMouseInput(mask: Int, _x: Int, _y: Int) {\n        val x = max(0, _x)\n        val y = max(0, _y)', 'fun onMouseInput(mask: Int, _x: Int, _y: Int) {\n        if (!hasTouchScreen) { onMouseInputShell(mask, _x, _y); return }\n        val x = max(0, _x)\n        val y = max(0, _y)')
+          content = content.replace('fun onTouchInput(mask: Int, _x: Int, _y: Int) {\n        when (mask) {', 'fun onTouchInput(mask: Int, _x: Int, _y: Int) {\n        if (!hasTouchScreen) { onTouchInputShell(mask, _x, _y); return }\n        when (mask) {')
           with open(filepath, 'w') as f:
               f.write(content)
-
-          print("OK: InputService.kt gepatcht met shell touch fallback voor Android TV")
-          PYEOF
-
+          print("OK: InputService.kt gepatcht")
+          PATCHSCRIPT
+          python3 /tmp/patch_input.py
           echo "=== Verificatie InputService patch ==="
-          grep -n "hasTouchScreen\|shellInput\|onMouseInputShell" "$INPUT_FILE" | head -10
+          grep -n "hasTouchScreen\|shellInput\|onMouseInputShell" flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt | head -10
 
       - name: Flutter instellen
         uses: subosito/flutter-action@v2
