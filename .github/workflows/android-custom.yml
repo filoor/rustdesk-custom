@@ -39,6 +39,7 @@ jobs:
       - name: Checkout broncode
         uses: actions/checkout@v4
         with:
+          repository: rustdesk/rustdesk
           ref: '1.4.5'
           submodules: recursive
 
@@ -129,6 +130,7 @@ jobs:
       - name: Checkout broncode
         uses: actions/checkout@v4
         with:
+          repository: rustdesk/rustdesk
           ref: '1.4.5'
           submodules: recursive
 
