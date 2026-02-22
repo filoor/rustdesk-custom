@@ -244,10 +244,10 @@ jobs:
           filepath = "flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt"
           with open(filepath, 'r') as f:
               content = f.read()
-          content = content.replace("import kotlin.math.max", "import kotlin.math.max\nimport android.content.pm.PackageManager")
+          content = content.replace("import kotlin.math.max", "import kotlin.math.max\nimport android.content.res.Configuration")
           helpers = textwrap.dedent("""\n
-              // DD Remote: shell fallback voor Android TV zonder touchscreen
-              private val hasTouchScreen: Boolean by lazy { packageManager.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN) }
+              // DD Remote: shell fallback voor Android TV (dispatchGesture werkt niet op TV)
+              private val isTvDevice: Boolean by lazy { (resources.configuration.uiMode and Configuration.UI_MODE_MASK_TYPE) == Configuration.UI_MODE_TYPE_TELEVISION }
               private var gestureStartX = 0
               private var gestureStartY = 0
               private fun shellInput(vararg args: String) { try { Runtime.getRuntime().exec(arrayOf("su", "0", "input") + args) } catch (e: Exception) { Log.e(logTag, "shellInput error: $$e") } }
@@ -277,15 +277,15 @@ jobs:
               }
           """)
           content = content.replace('private val logTag = "input service"', 'private val logTag = "input service"' + helpers)
-          content = content.replace('fun onMouseInput(mask: Int, _x: Int, _y: Int) {\n        val x = max(0, _x)\n        val y = max(0, _y)', 'fun onMouseInput(mask: Int, _x: Int, _y: Int) {\n        if (!hasTouchScreen) { onMouseInputShell(mask, _x, _y); return }\n        val x = max(0, _x)\n        val y = max(0, _y)')
-          content = content.replace('fun onTouchInput(mask: Int, _x: Int, _y: Int) {\n        when (mask) {', 'fun onTouchInput(mask: Int, _x: Int, _y: Int) {\n        if (!hasTouchScreen) { onTouchInputShell(mask, _x, _y); return }\n        when (mask) {')
+          content = content.replace('fun onMouseInput(mask: Int, _x: Int, _y: Int) {\n        val x = max(0, _x)\n        val y = max(0, _y)', 'fun onMouseInput(mask: Int, _x: Int, _y: Int) {\n        if (isTvDevice) { onMouseInputShell(mask, _x, _y); return }\n        val x = max(0, _x)\n        val y = max(0, _y)')
+          content = content.replace('fun onTouchInput(mask: Int, _x: Int, _y: Int) {\n        when (mask) {', 'fun onTouchInput(mask: Int, _x: Int, _y: Int) {\n        if (isTvDevice) { onTouchInputShell(mask, _x, _y); return }\n        when (mask) {')
           with open(filepath, 'w') as f:
               f.write(content)
           print("OK: InputService.kt gepatcht")
           PATCHSCRIPT
           python3 /tmp/patch_input.py
           echo "=== Verificatie InputService patch ==="
-          grep -n "hasTouchScreen\|shellInput\|onMouseInputShell" flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt | head -10
+          grep -n "isTvDevice\|shellInput\|onMouseInputShell" flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt | head -10
 
       - name: Flutter instellen
         uses: subosito/flutter-action@v2
