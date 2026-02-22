@@ -287,6 +287,33 @@ jobs:
           echo "=== Verificatie InputService patch ==="
           grep -n "isTvDevice\|shellInput\|onMouseInputShell" flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt | head -10
 
+      - name: Patch AudioRecordHandle voor Android TV (voorkom crash)
+        run: |
+          cat > /tmp/patch_audio.py << 'PATCHSCRIPT'
+          filepath = "flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/AudioRecordHandle.kt"
+          with open(filepath, 'r') as f:
+              content = f.read()
+
+          # Voeg isTvDevice check toe aan de class
+          content = content.replace(
+              'val logTag = "AudioRecordHandle"',
+              'val logTag = "AudioRecordHandle"\n    // DD Remote: skip AudioPlaybackCapture op Android TV (veroorzaakt SIGABRT)\n    private val isTvDevice: Boolean by lazy { (context.resources.configuration.uiMode and 0x0f) == 0x04 }'
+          )
+
+          # Blokkeer createAudioRecorder op TV devices
+          content = content.replace(
+              'fun createAudioRecorder(inVoiceCall: Boolean, mediaProjection: MediaProjection?): Boolean {',
+              'fun createAudioRecorder(inVoiceCall: Boolean, mediaProjection: MediaProjection?): Boolean {\n        if (isTvDevice) { Log.d(logTag, "Skipping audio capture on TV device"); return false }'
+          )
+
+          with open(filepath, 'w') as f:
+              f.write(content)
+          print("OK: AudioRecordHandle.kt gepatcht")
+          PATCHSCRIPT
+          python3 /tmp/patch_audio.py
+          echo "=== Verificatie AudioRecordHandle patch ==="
+          grep -n "isTvDevice\|TV device" flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/AudioRecordHandle.kt | head -5
+
       - name: Flutter instellen
         uses: subosito/flutter-action@v2
         with:
