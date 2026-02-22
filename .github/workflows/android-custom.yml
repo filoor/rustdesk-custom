@@ -244,10 +244,10 @@ jobs:
           filepath = "flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt"
           with open(filepath, 'r') as f:
               content = f.read()
-          content = content.replace("import kotlin.math.max", "import kotlin.math.max\nimport android.content.res.Configuration")
           helpers = textwrap.dedent("""\n
               // DD Remote: shell fallback voor Android TV (dispatchGesture werkt niet op TV)
-              private val isTvDevice: Boolean by lazy { (resources.configuration.uiMode and Configuration.UI_MODE_MASK_TYPE) == Configuration.UI_MODE_TYPE_TELEVISION }
+              // UI_MODE_MASK_TYPE=0x0f, UI_MODE_TYPE_TELEVISION=0x04
+              private val isTvDevice: Boolean by lazy { (resources.configuration.uiMode and 0x0f) == 0x04 }
               private var gestureStartX = 0
               private var gestureStartY = 0
               private fun shellInput(vararg args: String) { try { Runtime.getRuntime().exec(arrayOf("su", "0", "input") + args) } catch (e: Exception) { Log.e(logTag, "shellInput error: $$e") } }
